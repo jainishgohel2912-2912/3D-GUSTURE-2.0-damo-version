@@ -1,0 +1,419 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <title>Next-Gen Hand Particle System V2</title>
+    <style>
+        body { margin: 0; overflow: hidden; background: #050505; color: white; font-family: 'Segoe UI', sans-serif; }
+        canvas { display: block; }
+        #ui { position: absolute; top: 20px; left: 20px; pointer-events: none; text-shadow: 0 0 10px rgba(0,0,0,1); }
+        h1 { margin: 0; letter-spacing: 2px; font-weight: 300; }
+        .controls { margin-top: 10px; font-size: 1.1rem; }
+        .highlight { color: #00e5ff; font-weight: bold; }
+        .hint { font-size: 0.9rem; opacity: 0.7; margin-top: 5px; color: #aaa; }
+        #loading { position: fixed; top: 50%; left: 50%; transform: translate(-50%, -50%); font-size: 1.5rem; color: #00e5ff; }
+        #current-shape { position: absolute; bottom: 30px; right: 30px; font-size: 2rem; font-weight: 100; opacity: 0.8; }
+    </style>
+</head>
+<body>
+    <div id="loading">Initializing Neural Hand Tracking...</div>
+    <div id="ui">
+        <h1>Celestial Particles v2</h1>
+        <div class="controls">
+            <p><span class="highlight">Thumb + Index:</span> Explosion</p>
+            <p><span class="highlight">Thumb + Pinky:</span> Next Shape</p>
+            <p><span class="highlight">Hand Height:</span> Rotation Speed</p>
+        </div>
+    </div>
+    <div id="current-shape">Sphere</div>
+
+    <script id="vertexShader" type="x-shader/x-vertex">
+        uniform float uTime;
+        uniform float uMorph;
+        uniform vec3 uHandPos;
+        uniform float uExpansion;
+        
+        attribute vec3 targetPosition;
+        varying vec3 vColor;
+        varying float vDist;
+
+        // Simplex noise function for organic movement
+        vec3 mod289(vec3 x) { return x - floor(x * (1.0 / 289.0)) * 289.0; }
+        vec4 mod289(vec4 x) { return x - floor(x * (1.0 / 289.0)) * 289.0; }
+        vec4 permute(vec4 x) { return mod289(((x*34.0)+1.0)*x); }
+        vec4 taylorInvSqrt(vec4 r) { return 1.79284291400159 - 0.85373472095314 * r; }
+
+        float snoise(vec3 v) {
+            const vec2 C = vec2(1.0/6.0, 1.0/3.0);
+            const vec4 D = vec4(0.0, 0.5, 1.0, 2.0);
+            vec3 i  = floor(v + dot(v, C.yyy) );
+            vec3 x0 = v - i + dot(i, C.xxx) ;
+            vec3 g = step(x0.yzx, x0.xyz);
+            vec3 l = 1.0 - g;
+            vec3 i1 = min( g.xyz, l.zxy );
+            vec3 i2 = max( g.xyz, l.zxy );
+            vec3 x1 = x0 - i1 + C.xxx;
+            vec3 x2 = x0 - i2 + C.yyy;
+            vec3 x3 = x0 - D.yyy;
+            i = mod289(i);
+            vec4 p = permute( permute( permute(
+                        i.z + vec4(0.0, i1.z, i2.z, 1.0 ))
+                    + i.y + vec4(0.0, i1.y, i2.y, 1.0 ))
+                    + i.x + vec4(0.0, i1.x, i2.x, 1.0 ));
+            float n_ = 0.142857142857;
+            vec3  ns = n_ * D.wyz - D.xzx;
+            vec4 j = p - 49.0 * floor(p * ns.z * ns.z);
+            vec4 x_ = floor(j * ns.z);
+            vec4 y_ = floor(j - 7.0 * x_ );
+            vec4 x = x_ *ns.x + ns.yyyy;
+            vec4 y = y_ *ns.x + ns.yyyy;
+            vec4 h = 1.0 - abs(x) - abs(y);
+            vec4 b0 = vec4( x.xy, y.xy );
+            vec4 b1 = vec4( x.zw, y.zw );
+            vec4 s0 = floor(b0)*2.0 + 1.0;
+            vec4 s1 = floor(b1)*2.0 + 1.0;
+            vec4 sh = -step(h, vec4(0.0));
+            vec4 a0 = b0.xzyw + s0.xzyw*sh.xxyy ;
+            vec4 a1 = b1.xzyw + s1.xzyw*sh.zzww ;
+            vec3 p0 = vec3(a0.xy,h.x);
+            vec3 p1 = vec3(a0.zw,h.y);
+            vec3 p2 = vec3(a1.xy,h.z);
+            vec3 p3 = vec3(a1.zw,h.w);
+            vec4 norm = taylorInvSqrt(vec4(dot(p0,p0), dot(p1,p1), dot(p2, p2), dot(p3,p3)));
+            p0 *= norm.x; p1 *= norm.y; p2 *= norm.z; p3 *= norm.w;
+            vec4 m = max(0.6 - vec4(dot(x0,x0), dot(x1,x1), dot(x2,x2), dot(x3,x3)), 0.0);
+            m = m * m;
+            return 42.0 * dot( m*m, vec4( dot(p0,x0), dot(p1,x1), dot(p2,x2), dot(p3,x3) ) );
+        }
+
+        void main() {
+            // Cubic easing for smoother morph
+            float ease = uMorph * uMorph * (3.0 - 2.0 * uMorph);
+            vec3 mixedPos = mix(position, targetPosition, ease);
+            
+            // Interaction: Distance to hand
+            float dist = distance(mixedPos, uHandPos);
+            vDist = dist;
+
+            // Subtle noise movement
+            float noiseVal = snoise(mixedPos * 0.5 + uTime * 0.5);
+            mixedPos += normal * noiseVal * 0.1;
+
+            // Explosion logic (Pinch)
+            vec3 dir = normalize(mixedPos - uHandPos);
+            // Non-linear explosion falloff
+            float explodeFactor = uExpansion * 5.0 / (dist * dist + 0.1);
+            mixedPos += dir * clamp(explodeFactor, 0.0, 10.0);
+            
+            // Color logic
+            vec3 colorA = vec3(0.0, 0.8, 1.0); // Cyan
+            vec3 colorB = vec3(1.0, 0.1, 0.6); // Hot Pink
+            vec3 colorC = vec3(1.0, 0.9, 0.2); // Gold
+            
+            float colorMix = sin(dist * 2.0 - uTime * 3.0) * 0.5 + 0.5;
+            vColor = mix(colorA, colorB, colorMix);
+            if(uExpansion > 0.5) vColor = mix(vColor, colorC, 0.5);
+
+            vec4 mvPosition = modelViewMatrix * vec4(mixedPos, 1.0);
+            gl_PointSize = (8.0 / -mvPosition.z);
+            gl_Position = projectionMatrix * mvPosition;
+        }
+    </script>
+
+    <script id="fragmentShader" type="x-shader/x-fragment">
+        varying vec3 vColor;
+        void main() {
+            // Soft particle circle
+            vec2 cxy = 2.0 * gl_PointCoord - 1.0;
+            float r = dot(cxy, cxy);
+            if (r > 1.0) discard;
+            float alpha = 1.0 - pow(r, 3.0); // Soft edge
+            gl_FragColor = vec4(vColor, alpha);
+        }
+    </script>
+
+    <script type="importmap">
+    {
+        "imports": {
+            "three": "https://unpkg.com/three@0.160.0/build/three.module.js"
+        }
+    }
+    </script>
+
+    <script type="module">
+        import * as THREE from 'three';
+        import { HandLandmarker, FilesetResolver } from "https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.0";
+
+        let scene, camera, renderer, particles, handLandmarker, video;
+        const count = 35000;
+        
+        // State Management
+        const state = {
+            morphTarget: 0, // 0 to 1
+            currentShapeIndex: 0,
+            isMorphing: false,
+            lastGestureTime: 0
+        };
+
+        const shapeNames = ['Sphere', 'Heart', 'Saturn', 'Flower', 'DNA', 'Torus', 'Pyramid'];
+        const shapeCache = {};
+
+        // --- 1. Math Generation for All Shapes ---
+        function generateShapes() {
+            // Helper to get array
+            const getArr = () => new Float32Array(count * 3);
+
+            // Sphere
+            let arr = getArr();
+            for (let i = 0; i < count; i++) {
+                const phi = Math.acos(-1 + (2 * i) / count);
+                const theta = Math.sqrt(count * Math.PI) * phi;
+                arr[i*3] = 2 * Math.cos(theta) * Math.sin(phi);
+                arr[i*3+1] = 2 * Math.sin(theta) * Math.sin(phi);
+                arr[i*3+2] = 2 * Math.cos(phi);
+            }
+            shapeCache['Sphere'] = arr;
+
+            // Heart
+            arr = getArr();
+            for (let i = 0; i < count; i++) {
+                const t = Math.random() * Math.PI * 2;
+                const r = Math.random(); // volume filler
+                // 3D Heart formula
+                const x = 16 * Math.pow(Math.sin(t), 3);
+                const y = 13 * Math.cos(t) - 5 * Math.cos(2*t) - 2 * Math.cos(3*t) - Math.cos(4*t);
+                const z = (Math.random()-0.5) * 4; 
+                // Scale down
+                arr[i*3] = x * 0.15;
+                arr[i*3+1] = y * 0.15 + 0.5;
+                arr[i*3+2] = z * 0.15;
+            }
+            shapeCache['Heart'] = arr;
+
+            // Saturn
+            arr = getArr();
+            for(let i=0; i<count; i++) {
+                let x,y,z;
+                if (i < count * 0.4) { // Planet
+                    const phi = Math.acos(-1 + (2 * i) / (count * 0.4));
+                    const theta = Math.sqrt(count * Math.PI) * phi;
+                    x = 1.0 * Math.cos(theta) * Math.sin(phi);
+                    y = 1.0 * Math.sin(theta) * Math.sin(phi);
+                    z = 1.0 * Math.cos(phi);
+                } else { // Rings
+                    const angle = Math.random() * Math.PI * 2;
+                    const rad = 1.5 + Math.random() * 1.5;
+                    x = Math.cos(angle) * rad;
+                    y = (Math.random() - 0.5) * 0.1;
+                    z = Math.sin(angle) * rad;
+                }
+                arr[i*3] = x; arr[i*3+1] = y; arr[i*3+2] = z;
+            }
+            shapeCache['Saturn'] = arr;
+
+            // Flower (Polar Rose)
+            arr = getArr();
+            for(let i=0; i<count; i++) {
+                const u = Math.random() * Math.PI * 2;
+                const v = Math.random() * Math.PI;
+                // Rose curve logic for radius
+                const r = 1.5 + 0.8 * Math.sin(5 * u) * Math.sin(v);
+                arr[i*3] = r * Math.cos(u) * Math.sin(v);
+                arr[i*3+1] = r * Math.sin(u) * Math.sin(v);
+                arr[i*3+2] = r * Math.cos(v);
+            }
+            shapeCache['Flower'] = arr;
+
+            // DNA Helix
+            arr = getArr();
+            for(let i=0; i<count; i++) {
+                const t = (i / count) * Math.PI * 20; // 10 turns
+                const strand = (i % 2 === 0) ? 1 : -1;
+                const radius = 1.5;
+                const x = Math.cos(t) * radius + (Math.random()-0.5)*0.2;
+                const z = Math.sin(t) * radius + (Math.random()-0.5)*0.2 + (strand * 0.5); // separation
+                const y = (i / count) * 8 - 4; // Height -4 to 4
+                arr[i*3] = x; arr[i*3+1] = y; arr[i*3+2] = z;
+            }
+            shapeCache['DNA'] = arr;
+
+            // Torus
+            arr = getArr();
+            for(let i=0; i<count; i++) {
+                const u = Math.random() * Math.PI * 2;
+                const v = Math.random() * Math.PI * 2;
+                const R = 2.0; // Major radius
+                const r = 0.8; // Minor radius
+                arr[i*3] = (R + r * Math.cos(v)) * Math.cos(u);
+                arr[i*3+1] = (R + r * Math.cos(v)) * Math.sin(u);
+                arr[i*3+2] = r * Math.sin(v);
+            }
+            shapeCache['Torus'] = arr;
+
+            // Pyramid
+            arr = getArr();
+            for(let i=0; i<count; i++) {
+                const h = Math.random() * 3; // Height 0 to 3
+                const w = (3 - h) * 0.8; // Width gets smaller as height goes up
+                arr[i*3] = (Math.random() - 0.5) * 2 * w;
+                arr[i*3+1] = h - 1.5;
+                arr[i*3+2] = (Math.random() - 0.5) * 2 * w;
+            }
+            shapeCache['Pyramid'] = arr;
+        }
+
+        async function setupHandTracking() {
+            const vision = await FilesetResolver.forVisionTasks("https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.0/wasm");
+            handLandmarker = await HandLandmarker.createFromOptions(vision, {
+                baseOptions: { 
+                    modelAssetPath: `https://storage.googleapis.com/mediapipe-models/hand_landmarker/hand_landmarker/float16/1/hand_landmarker.task`,
+                    delegate: "GPU" 
+                },
+                runningMode: "VIDEO", numHands: 1
+            });
+            
+            video = document.createElement('video');
+            const stream = await navigator.mediaDevices.getUserMedia({ video: true });
+            video.srcObject = stream;
+            video.play();
+            document.getElementById('loading').style.display = 'none';
+        }
+
+        function init() {
+            generateShapes();
+
+            scene = new THREE.Scene();
+            camera = new THREE.PerspectiveCamera(75, window.innerWidth/window.innerHeight, 0.1, 1000);
+            camera.position.z = 6;
+
+            renderer = new THREE.WebGLRenderer({ antialias: true });
+            renderer.setSize(window.innerWidth, window.innerHeight);
+            renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
+            document.body.appendChild(renderer.domElement);
+
+            const geometry = new THREE.BufferGeometry();
+            
+            // Initial State: Position = Sphere, Target = Heart (Preloaded)
+            geometry.setAttribute('position', new THREE.BufferAttribute(shapeCache['Sphere'], 3));
+            geometry.setAttribute('targetPosition', new THREE.BufferAttribute(shapeCache['Sphere'], 3)); // Start same so no jump
+            
+            const material = new THREE.ShaderMaterial({
+                uniforms: {
+                    uTime: { value: 0 },
+                    uMorph: { value: 0 },
+                    uHandPos: { value: new THREE.Vector3(0, 0, 0) },
+                    uExpansion: { value: 0 }
+                },
+                vertexShader: document.getElementById('vertexShader').textContent,
+                fragmentShader: document.getElementById('fragmentShader').textContent,
+                transparent: true,
+                blending: THREE.AdditiveBlending,
+                depthWrite: false
+            });
+
+            particles = new THREE.Points(geometry, material);
+            scene.add(particles);
+
+            window.addEventListener('resize', () => {
+                camera.aspect = window.innerWidth / window.innerHeight;
+                camera.updateProjectionMatrix();
+                renderer.setSize(window.innerWidth, window.innerHeight);
+            });
+        }
+
+        function triggerShapeChange() {
+            if (state.isMorphing) return;
+            
+            state.isMorphing = true;
+            
+            // 1. Current state becomes the new base
+            const currentAttr = particles.geometry.attributes.position;
+            const targetAttr = particles.geometry.attributes.targetPosition;
+            
+            // Ideally we copy target to position, but since we are at uMorph=1, 
+            // visually we are at target. We can swap or just update buffers.
+            // Fast swap:
+            currentAttr.array.set(targetAttr.array);
+            currentAttr.needsUpdate = true;
+            
+            // 2. Determine next shape
+            state.currentShapeIndex = (state.currentShapeIndex + 1) % shapeNames.length;
+            const nextShapeName = shapeNames[state.currentShapeIndex];
+            document.getElementById('current-shape').innerText = nextShapeName;
+            
+            // 3. Set new target
+            targetAttr.array.set(shapeCache[nextShapeName]);
+            targetAttr.needsUpdate = true;
+
+            // 4. Reset morph and animate
+            particles.material.uniforms.uMorph.value = 0;
+            
+            // Simple animation loop for morph variable
+            const startTime = performance.now();
+            const duration = 1500; // 1.5s morph
+            
+            function animateMorph() {
+                const now = performance.now();
+                const progress = Math.min((now - startTime) / duration, 1.0);
+                particles.material.uniforms.uMorph.value = progress;
+                
+                if (progress < 1.0) {
+                    requestAnimationFrame(animateMorph);
+                } else {
+                    state.isMorphing = false;
+                }
+            }
+            animateMorph();
+        }
+
+        function animate() {
+            requestAnimationFrame(animate);
+            const time = performance.now() * 0.001;
+            particles.material.uniforms.uTime.value = time;
+
+            // Default rotation
+            particles.rotation.y += 0.001;
+
+            if (handLandmarker && video.readyState >= 2) {
+                const results = handLandmarker.detectForVideo(video, performance.now());
+                if (results.landmarks && results.landmarks[0]) {
+                    const hand = results.landmarks[0];
+                    
+                    // 1. Position Mapping
+                    const x = (hand[9].x - 0.5) * -12;
+                    const y = (hand[9].y - 0.5) * -12;
+                    particles.material.uniforms.uHandPos.value.set(x, y, 0);
+
+                    // 2. Hand Height -> Rotation Speed
+                    const height = 1.0 - hand[9].y; // 0 (bottom) to 1 (top)
+                    particles.rotation.y += height * 0.02;
+
+                    // 3. Pinch Logic (Thumb + Index)
+                    const pinchDist = Math.hypot(hand[4].x - hand[8].x, hand[4].y - hand[8].y);
+                    const isPinching = pinchDist < 0.05;
+                    // Smooth Lerp for expansion
+                    const targetExp = isPinching ? 1.0 : 0.0;
+                    particles.material.uniforms.uExpansion.value = THREE.MathUtils.lerp(
+                        particles.material.uniforms.uExpansion.value,
+                        targetExp,
+                        0.1
+                    );
+
+                    // 4. Switch Logic (Thumb + Pinky)
+                    const switchDist = Math.hypot(hand[4].x - hand[20].x, hand[4].y - hand[20].y);
+                    if (switchDist < 0.05 && (performance.now() - state.lastGestureTime > 2000)) {
+                        triggerShapeChange();
+                        state.lastGestureTime = performance.now();
+                    }
+                }
+            }
+
+            renderer.render(scene, camera);
+        }
+
+        await setupHandTracking();
+        init();
+        animate();
+    </script>
+</body>
+</html>
